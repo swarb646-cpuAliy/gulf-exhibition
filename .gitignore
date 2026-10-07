@@ -1,0 +1,11 @@
+node_modules/
+*.zip
+*-BACKUP-*/
+*.backup
+*.before-*
+
+uploads/
+
+admin.backup-*/
+visitor.backup-*/
+*.backup-*
