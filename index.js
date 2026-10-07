@@ -5,6 +5,9 @@ const crypto = require('crypto');
 const multer = require('multer');
 const admin = require('firebase-admin');
 
+const ImageKit = require('@imagekit/nodejs');
+
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -14,6 +17,11 @@ const VISITOR_DIR = path.join(ROOT, 'visitor');
 const ADMIN_DIR = path.join(ROOT, 'admin');
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
 const DATA_FILE = path.join(ROOT, 'data.json');
+
+const imagekit = new ImageKit({
+    privateKey: process.env.IMAGEKIT_PRIVATE_KEY
+});
+
 
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -322,6 +330,31 @@ function normalizeImages(value) {
     }
 }
 
+
+async function uploadToImageKit(file) {
+    if (!file || !process.env.IMAGEKIT_PRIVATE_KEY) {
+        return null;
+    }
+
+    try {
+        const result = await imagekit.files.upload({
+            file: fs.createReadStream(file.path),
+            fileName: file.filename,
+            useUniqueFileName: true,
+            folder: '/exhibition'
+        });
+
+        return result.url;
+    } catch (err) {
+        console.error(
+            'ImageKit upload error:',
+            err.message
+        );
+
+        return null;
+    }
+}
+               
 /* =========================================
    MULTER
 ========================================= */
@@ -651,8 +684,8 @@ app.post(
             maxCount: 1
         }
     ]),
-    (req, res) => {
-        try {
+   async (req, res) => {
+    try {
             const title = clean(
                 req.body.title
             );
@@ -684,15 +717,35 @@ app.post(
                 });
             }
 
-            const images = (
-                req.files?.images || []
-            ).map(
-                file =>
-                    `/uploads/${file.filename}`
-            );
+            const imageFiles = req.files?.images || [];
 
-            const videoFile =
-                req.files?.video?.[0];
+const images = (
+    await Promise.all(
+        imageFiles.map(async file => {
+            const imageKitUrl =
+                await uploadToImageKit(file);
+
+            return (
+                imageKitUrl ||
+                `/uploads/${file.filename}`
+            );
+        })
+    )
+);
+
+const videoFile =
+    req.files?.video?.[0];
+
+let videoUrl = '';
+
+if (videoFile) {
+    const imageKitVideoUrl =
+        await uploadToImageKit(videoFile);
+
+    videoUrl =
+        imageKitVideoUrl ||
+        `/uploads/${videoFile.filename}`;
+}
 
             const listing = {
                 id: crypto.randomUUID(),
@@ -715,9 +768,7 @@ app.post(
 
                 images,
 
-                video: videoFile
-                    ? `/uploads/${videoFile.filename}`
-                    : '',
+                video: videoUrl,
 
                 published:
                     req.body.published !==
@@ -769,7 +820,7 @@ app.put(
             maxCount: 1
         }
     ]),
-    (req, res) => {
+    async (req, res) => {
         try {
             const listing =
                 data.listings.find(
@@ -810,11 +861,23 @@ app.put(
                 }
             }
 
+            const newImageFiles =
+                req.files?.images || [];
+
             const newImages = (
-                req.files?.images || []
-            ).map(
-                file =>
-                    `/uploads/${file.filename}`
+                await Promise.all(
+                    newImageFiles.map(
+                        async file => {
+                            const imageKitUrl =
+                                await uploadToImageKit(file);
+
+                            return (
+                                imageKitUrl ||
+                                `/uploads/${file.filename}`
+                            );
+                        }
+                    )
+                )
             );
 
             const finalImages = [
@@ -833,7 +896,13 @@ app.put(
             );
 
             if (newVideoFile) {
+                const imageKitVideoUrl =
+                    await uploadToImageKit(
+                        newVideoFile
+                    );
+
                 finalVideo =
+                    imageKitVideoUrl ||
                     `/uploads/${newVideoFile.filename}`;
 
                 if (
