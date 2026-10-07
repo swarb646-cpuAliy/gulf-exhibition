@@ -497,6 +497,26 @@ app.delete('/api/listings/:id', requireAdmin, (req, res) => {
    صفحة الأدمن
 ========================= */
 
+app.get('/manifest.json', (req, res) => {
+    res.sendFile(path.join(VISITOR_DIR, 'manifest.json'));
+});
+
+app.get('/icon-192.png', (req, res) => {
+    res.sendFile(path.join(UPLOAD_DIR, 'icon-192.png'));
+});
+
+app.get('/icon-512.png', (req, res) => {
+    res.sendFile(path.join(UPLOAD_DIR, 'icon-512.png'));
+});
+
+app.get('/og-image.jpg', (req, res) => {
+    res.sendFile(path.join(UPLOAD_DIR, 'og-image.jpg'));
+});
+
+app.get('/sw.js', (req, res) => {
+    res.sendFile(path.join(VISITOR_DIR, 'sw.js'));
+});
+
 app.get('/admin', (req, res) => {
     res.sendFile(path.join(ADMIN_DIR, 'index.html'));
 });
