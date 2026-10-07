@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
+const admin = require('firebase-admin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,6 +18,41 @@ const DATA_FILE = path.join(ROOT, 'data.json');
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+/* =========================================
+   FIREBASE
+========================================= */
+
+let db = null;
+let firebaseEnabled = false;
+
+try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const serviceAccount = JSON.parse(
+            process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+        );
+
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            databaseURL:
+                'https://interactive-exhibition-default-rtdb.firebaseio.com'
+        });
+
+        db = admin.database();
+        firebaseEnabled = true;
+
+        console.log('Firebase: ENABLED');
+    } else {
+        console.log('Firebase: DISABLED - environment variable not found');
+    }
+} catch (err) {
+    console.error('Firebase initialization error:', err.message);
+    console.log('Server will continue using local data.json');
+}
+
+/* =========================================
+   DEFAULT DATA
+========================================= */
+
 const DEFAULT_DATA = {
     settings: {
         name: 'المعرض التفاعلي',
@@ -28,76 +64,267 @@ const DEFAULT_DATA = {
         x: '',
         announcement: ''
     },
+
     categories: [
-        { id: crypto.randomUUID(), name: 'عقارات', icon: '🏠' },
-        { id: crypto.randomUUID(), name: 'سيارات', icon: '🚗' },
-        { id: crypto.randomUUID(), name: 'محلات', icon: '🏪' },
-        { id: crypto.randomUUID(), name: 'جوالات وأجهزة', icon: '📱' },
-        { id: crypto.randomUUID(), name: 'أثاث', icon: '🛋️' },
-        { id: crypto.randomUUID(), name: 'أخرى', icon: '📦' }
+        {
+            id: crypto.randomUUID(),
+            name: 'عقارات',
+            icon: '🏠'
+        },
+        {
+            id: crypto.randomUUID(),
+            name: 'سيارات',
+            icon: '🚗'
+        },
+        {
+            id: crypto.randomUUID(),
+            name: 'محلات',
+            icon: '🏪'
+        },
+        {
+            id: crypto.randomUUID(),
+            name: 'جوالات وأجهزة',
+            icon: '📱'
+        },
+        {
+            id: crypto.randomUUID(),
+            name: 'أثاث',
+            icon: '🛋️'
+        },
+        {
+            id: crypto.randomUUID(),
+            name: 'أخرى',
+            icon: '📦'
+        }
     ],
+
     listings: []
 };
 
-function loadData() {
+/* =========================================
+   DATA HELPERS
+========================================= */
+
+function cloneDefaultData() {
+    return JSON.parse(JSON.stringify(DEFAULT_DATA));
+}
+
+function normalizeData(value) {
+    const source =
+        value && typeof value === 'object'
+            ? value
+            : {};
+
+    const result = {
+        settings: {
+            ...DEFAULT_DATA.settings,
+            ...(source.settings || {})
+        },
+
+        categories: Array.isArray(source.categories)
+            ? source.categories
+            : [],
+
+        listings: Array.isArray(source.listings)
+            ? source.listings
+            : []
+    };
+
+    return result;
+}
+
+function loadLocalData() {
     try {
         if (!fs.existsSync(DATA_FILE)) {
-            fs.writeFileSync(DATA_FILE, JSON.stringify(DEFAULT_DATA, null, 2), 'utf8');
-            return JSON.parse(JSON.stringify(DEFAULT_DATA));
+            const initialData = cloneDefaultData();
+
+            fs.writeFileSync(
+                DATA_FILE,
+                JSON.stringify(initialData, null, 2),
+                'utf8'
+            );
+
+            return initialData;
         }
 
-        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        const raw = fs.readFileSync(DATA_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
 
-        data.settings ||= DEFAULT_DATA.settings;
-        data.categories ||= [];
-        data.listings ||= [];
-
-        return data;
+        return normalizeData(parsed);
     } catch (err) {
-        console.error('Data load error:', err);
-        return JSON.parse(JSON.stringify(DEFAULT_DATA));
+        console.error('Data load error:', err.message);
+
+        return cloneDefaultData();
     }
 }
 
-let data = loadData();
+let data = loadLocalData();
 
-function saveData() {
+/* =========================================
+   LOCAL SAVE
+========================================= */
+
+function saveLocalData() {
     const temp = DATA_FILE + '.tmp';
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2), 'utf8');
+
+    fs.writeFileSync(
+        temp,
+        JSON.stringify(data, null, 2),
+        'utf8'
+    );
+
     fs.renameSync(temp, DATA_FILE);
 }
+
+/* =========================================
+   FIREBASE SAVE
+========================================= */
+
+async function saveToFirebase() {
+    if (!firebaseEnabled || !db) {
+        return;
+    }
+
+    try {
+        await db.ref('exhibition/data').set(data);
+
+        console.log('Firebase sync: saved');
+    } catch (err) {
+        console.error(
+            'Firebase save error:',
+            err.message
+        );
+    }
+}
+
+/* =========================================
+   MAIN SAVE
+========================================= */
+
+function saveData() {
+    try {
+        saveLocalData();
+    } catch (err) {
+        console.error(
+            'Local data save error:',
+            err.message
+        );
+    }
+
+    if (firebaseEnabled) {
+        saveToFirebase().catch(err => {
+            console.error(
+                'Firebase background save error:',
+                err.message
+            );
+        });
+    }
+}
+
+/* =========================================
+   RESTORE FROM FIREBASE
+========================================= */
+
+async function restoreFromFirebase() {
+    if (!firebaseEnabled || !db) {
+        return;
+    }
+
+    try {
+        const snapshot = await db
+            .ref('exhibition/data')
+            .once('value');
+
+        const cloudData = snapshot.val();
+
+        if (
+            cloudData &&
+            typeof cloudData === 'object'
+        ) {
+            data = normalizeData(cloudData);
+
+            saveLocalData();
+
+            console.log(
+                'Firebase sync: latest data restored'
+            );
+        } else {
+            await db
+                .ref('exhibition/data')
+                .set(data);
+
+            console.log(
+                'Firebase sync: initial data uploaded'
+            );
+        }
+    } catch (err) {
+        console.error(
+            'Firebase restore error:',
+            err.message
+        );
+
+        console.log(
+            'Using local data.json instead'
+        );
+    }
+}
+
+/* =========================================
+   GENERAL HELPERS
+========================================= */
 
 function clean(value) {
     return String(value ?? '').trim();
 }
 
 function deleteFileUrl(fileUrl) {
-    if (!fileUrl || typeof fileUrl !== 'string') return;
-    if (!fileUrl.startsWith('/uploads/')) return;
+    if (!fileUrl || typeof fileUrl !== 'string') {
+        return;
+    }
+
+    if (!fileUrl.startsWith('/uploads/')) {
+        return;
+    }
 
     const filename = path.basename(fileUrl);
-    const filePath = path.join(UPLOAD_DIR, filename);
+    const filePath = path.join(
+        UPLOAD_DIR,
+        filename
+    );
 
     try {
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
     } catch (err) {
-        console.error('File delete error:', err.message);
+        console.error(
+            'File delete error:',
+            err.message
+        );
     }
 }
 
 function normalizeImages(value) {
     try {
         const parsed = JSON.parse(value || '[]');
-        if (!Array.isArray(parsed)) return [];
+
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
         return parsed.filter(
-            x => typeof x === 'string' && x.startsWith('/uploads/')
+            x =>
+                typeof x === 'string' &&
+                x.startsWith('/uploads/')
         );
     } catch {
         return [];
     }
 }
+
+/* =========================================
+   MULTER
+========================================= */
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -105,11 +332,18 @@ const storage = multer.diskStorage({
     },
 
     filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname || '').toLowerCase();
-        const safeExt = ext.replace(/[^a-z0-9.]/gi, '') || '';
+        const ext = path
+            .extname(file.originalname || '')
+            .toLowerCase();
+
+        const safeExt =
+            ext.replace(/[^a-z0-9.]/gi, '') || '';
+
         cb(
             null,
-            `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${safeExt}`
+            `${Date.now()}-${crypto
+                .randomBytes(8)
+                .toString('hex')}${safeExt}`
         );
     }
 });
@@ -129,18 +363,32 @@ const upload = multer({
         ) {
             cb(null, true);
         } else {
-            cb(new Error('نوع الملف غير مسموح'));
+            cb(
+                new Error(
+                    'نوع الملف غير مسموح'
+                )
+            );
         }
     }
 });
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '123456';
+/* =========================================
+   ADMIN AUTH
+========================================= */
+
+const ADMIN_PASSWORD =
+    process.env.ADMIN_PASSWORD || '123456';
+
 const adminTokens = new Set();
 
 function requireAdmin(req, res, next) {
-    const token = req.headers['x-admin-token'];
+    const token =
+        req.headers['x-admin-token'];
 
-    if (!token || !adminTokens.has(token)) {
+    if (
+        !token ||
+        !adminTokens.has(token)
+    ) {
         return res.status(401).json({
             success: false,
             message: 'غير مصرح'
@@ -150,206 +398,342 @@ function requireAdmin(req, res, next) {
     next();
 }
 
-app.use(express.json({ limit: '5mb' }));
-app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+/* =========================================
+   EXPRESS
+========================================= */
 
-app.use('/uploads', express.static(UPLOAD_DIR));
+app.use(
+    express.json({
+        limit: '5mb'
+    })
+);
 
-/* =========================
-   تسجيل دخول الأدمن
-========================= */
+app.use(
+    express.urlencoded({
+        extended: true,
+        limit: '5mb'
+    })
+);
 
-app.post('/api/admin-login', (req, res) => {
-    const password = clean(req.body.password);
+/* =========================================
+   STATIC UPLOADS
+========================================= */
 
-    if (password !== ADMIN_PASSWORD) {
-        return res.status(401).json({
-            success: false,
-            message: 'كلمة المرور غير صحيحة'
+app.use(
+    '/uploads',
+    express.static(UPLOAD_DIR)
+);
+
+/* =========================================
+   ADMIN LOGIN
+========================================= */
+
+app.post(
+    '/api/admin-login',
+    (req, res) => {
+        const password = clean(
+            req.body.password
+        );
+
+        if (password !== ADMIN_PASSWORD) {
+            return res.status(401).json({
+                success: false,
+                message:
+                    'كلمة المرور غير صحيحة'
+            });
+        }
+
+        const token =
+            crypto.randomBytes(32).toString(
+                'hex'
+            );
+
+        adminTokens.add(token);
+
+        res.json({
+            success: true,
+            token
         });
     }
+);
 
-    const token = crypto.randomBytes(32).toString('hex');
-    adminTokens.add(token);
-
-    res.json({
-        success: true,
-        token
-    });
-});
-
-/* =========================
-   البيانات العامة
-========================= */
+/* =========================================
+   GET DATA
+========================================= */
 
 app.get('/api/data', (req, res) => {
     res.json(data);
 });
 
-/* =========================
-   الإعدادات
-========================= */
+/* =========================================
+   SETTINGS
+========================================= */
 
-app.put('/api/settings', requireAdmin, (req, res) => {
-    data.settings = {
-        name: clean(req.body.name),
-        description: clean(req.body.description),
-        whatsapp: clean(req.body.whatsapp),
-        phone: clean(req.body.phone),
-        email: clean(req.body.email),
-        website: clean(req.body.website),
-        x: clean(req.body.x),
-        announcement: clean(req.body.announcement)
-    };
+app.put(
+    '/api/settings',
+    requireAdmin,
+    (req, res) => {
+        data.settings = {
+            name: clean(req.body.name),
+            description: clean(
+                req.body.description
+            ),
+            whatsapp: clean(
+                req.body.whatsapp
+            ),
+            phone: clean(req.body.phone),
+            email: clean(req.body.email),
+            website: clean(
+                req.body.website
+            ),
+            x: clean(req.body.x),
+            announcement: clean(
+                req.body.announcement
+            )
+        };
 
-    saveData();
+        saveData();
 
-    res.json({
-        success: true,
-        settings: data.settings
-    });
-});
-
-/* =========================
-   التصنيفات
-========================= */
-
-app.post('/api/categories', requireAdmin, (req, res) => {
-    const name = clean(req.body.name);
-    const icon = clean(req.body.icon) || '📦';
-
-    if (!name) {
-        return res.status(400).json({
-            success: false,
-            message: 'اسم التصنيف مطلوب'
+        res.json({
+            success: true,
+            settings: data.settings
         });
     }
+);
 
-    const category = {
-        id: crypto.randomUUID(),
-        name,
-        icon
-    };
+/* =========================================
+   ADD CATEGORY
+========================================= */
 
-    data.categories.push(category);
-    saveData();
+app.post(
+    '/api/categories',
+    requireAdmin,
+    (req, res) => {
+        const name = clean(
+            req.body.name
+        );
 
-    res.json({
-        success: true,
-        category
-    });
-});
+        const icon =
+            clean(req.body.icon) || '📦';
 
-app.put('/api/categories/:id', requireAdmin, (req, res) => {
-    const category = data.categories.find(x => x.id === req.params.id);
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'اسم التصنيف مطلوب'
+            });
+        }
 
-    if (!category) {
-        return res.status(404).json({
-            success: false,
-            message: 'التصنيف غير موجود'
+        const category = {
+            id: crypto.randomUUID(),
+            name,
+            icon
+        };
+
+        data.categories.push(category);
+
+        saveData();
+
+        res.json({
+            success: true,
+            category
         });
     }
+);
 
-    category.name = clean(req.body.name) || category.name;
-    category.icon = clean(req.body.icon) || category.icon;
+/* =========================================
+   EDIT CATEGORY
+========================================= */
 
-    saveData();
+app.put(
+    '/api/categories/:id',
+    requireAdmin,
+    (req, res) => {
+        const category =
+            data.categories.find(
+                x =>
+                    x.id ===
+                    req.params.id
+            );
 
-    res.json({
-        success: true,
-        category
-    });
-});
+        if (!category) {
+            return res.status(404).json({
+                success: false,
+                message:
+                    'التصنيف غير موجود'
+            });
+        }
 
-app.delete('/api/categories/:id', requireAdmin, (req, res) => {
-    const category = data.categories.find(x => x.id === req.params.id);
+        category.name =
+            clean(req.body.name) ||
+            category.name;
 
-    if (!category) {
-        return res.status(404).json({
-            success: false,
-            message: 'التصنيف غير موجود'
+        category.icon =
+            clean(req.body.icon) ||
+            category.icon;
+
+        saveData();
+
+        res.json({
+            success: true,
+            category
         });
     }
+);
 
-    const used = data.listings.some(
-        listing => listing.categoryId === req.params.id
-    );
+/* =========================================
+   DELETE CATEGORY
+========================================= */
 
-    if (used) {
-        return res.status(400).json({
-            success: false,
-            message: 'لا يمكن حذف تصنيف يحتوي على إعلانات'
+app.delete(
+    '/api/categories/:id',
+    requireAdmin,
+    (req, res) => {
+        const category =
+            data.categories.find(
+                x =>
+                    x.id ===
+                    req.params.id
+            );
+
+        if (!category) {
+            return res.status(404).json({
+                success: false,
+                message:
+                    'التصنيف غير موجود'
+            });
+        }
+
+        const used =
+            data.listings.some(
+                listing =>
+                    listing.categoryId ===
+                    req.params.id
+            );
+
+        if (used) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'لا يمكن حذف تصنيف يحتوي على إعلانات'
+            });
+        }
+
+        data.categories =
+            data.categories.filter(
+                x =>
+                    x.id !==
+                    req.params.id
+            );
+
+        saveData();
+
+        res.json({
+            success: true
         });
     }
+);
 
-    data.categories = data.categories.filter(
-        x => x.id !== req.params.id
-    );
-
-    saveData();
-
-    res.json({
-        success: true
-    });
-});
-
-/* =========================
-   إضافة إعلان
-========================= */
+/* =========================================
+   ADD LISTING
+========================================= */
 
 app.post(
     '/api/listings',
     requireAdmin,
     upload.fields([
-        { name: 'images', maxCount: 15 },
-        { name: 'video', maxCount: 1 }
+        {
+            name: 'images',
+            maxCount: 15
+        },
+        {
+            name: 'video',
+            maxCount: 1
+        }
     ]),
     (req, res) => {
         try {
-            const title = clean(req.body.title);
-            const categoryId = clean(req.body.categoryId);
+            const title = clean(
+                req.body.title
+            );
+
+            const categoryId = clean(
+                req.body.categoryId
+            );
 
             if (!title || !categoryId) {
                 return res.status(400).json({
                     success: false,
-                    message: 'العنوان والتصنيف مطلوبان'
+                    message:
+                        'العنوان والتصنيف مطلوبان'
                 });
             }
 
-            const category = data.categories.find(
-                x => String(x.id) === String(categoryId)
-            );
+            const category =
+                data.categories.find(
+                    x =>
+                        String(x.id) ===
+                        String(categoryId)
+                );
 
             if (!category) {
                 return res.status(400).json({
                     success: false,
-                    message: 'التصنيف غير موجود'
+                    message:
+                        'التصنيف غير موجود'
                 });
             }
 
-            const images = (req.files?.images || []).map(
-                file => `/uploads/${file.filename}`
+            const images = (
+                req.files?.images || []
+            ).map(
+                file =>
+                    `/uploads/${file.filename}`
             );
 
-            const videoFile = req.files?.video?.[0];
+            const videoFile =
+                req.files?.video?.[0];
 
             const listing = {
                 id: crypto.randomUUID(),
+
                 title,
+
                 categoryId,
-                price: clean(req.body.price),
-                location: clean(req.body.location),
-                description: clean(req.body.description),
+
+                price: clean(
+                    req.body.price
+                ),
+
+                location: clean(
+                    req.body.location
+                ),
+
+                description: clean(
+                    req.body.description
+                ),
+
                 images,
+
                 video: videoFile
                     ? `/uploads/${videoFile.filename}`
                     : '',
-                published: req.body.published !== 'false',
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString()
+
+                published:
+                    req.body.published !==
+                    'false',
+
+                createdAt:
+                    new Date().toISOString(),
+
+                updatedAt:
+                    new Date().toISOString()
             };
 
-            data.listings.unshift(listing);
+            data.listings.unshift(
+                listing
+            );
+
             saveData();
 
             res.json({
@@ -358,54 +742,79 @@ app.post(
             });
         } catch (err) {
             console.error(err);
+
             res.status(500).json({
                 success: false,
-                message: 'حدث خطأ أثناء إضافة الإعلان'
+                message:
+                    'حدث خطأ أثناء إضافة الإعلان'
             });
         }
     }
 );
 
-/* =========================
-   تعديل إعلان
-========================= */
+/* =========================================
+   EDIT LISTING
+========================================= */
 
 app.put(
     '/api/listings/:id',
     requireAdmin,
     upload.fields([
-        { name: 'images', maxCount: 15 },
-        { name: 'video', maxCount: 1 }
+        {
+            name: 'images',
+            maxCount: 15
+        },
+        {
+            name: 'video',
+            maxCount: 1
+        }
     ]),
     (req, res) => {
         try {
-            const listing = data.listings.find(
-                x => x.id === req.params.id
-            );
+            const listing =
+                data.listings.find(
+                    x =>
+                        x.id ===
+                        req.params.id
+                );
 
             if (!listing) {
                 return res.status(404).json({
                     success: false,
-                    message: 'الإعلان غير موجود'
+                    message:
+                        'الإعلان غير موجود'
                 });
             }
 
-            const oldImages = Array.isArray(listing.images)
-                ? listing.images
-                : [];
+            const oldImages =
+                Array.isArray(
+                    listing.images
+                )
+                    ? listing.images
+                    : [];
 
-            const existingImages = normalizeImages(
-                req.body.existingImages
-            );
+            const existingImages =
+                normalizeImages(
+                    req.body.existingImages
+                );
 
             for (const oldImage of oldImages) {
-                if (!existingImages.includes(oldImage)) {
-                    deleteFileUrl(oldImage);
+                if (
+                    !existingImages.includes(
+                        oldImage
+                    )
+                ) {
+                    deleteFileUrl(
+                        oldImage
+                    );
                 }
             }
 
-            const newImages = (req.files?.images || []).map(
-                file => `/uploads/${file.filename}`
+            const newImages = (
+                req.files?.images || []
+            ).map(
+                file =>
+                    `/uploads/${file.filename}`
             );
 
             const finalImages = [
@@ -413,34 +822,71 @@ app.put(
                 ...newImages
             ];
 
-            const oldVideo = listing.video || '';
-            const newVideoFile = req.files?.video?.[0];
+            const oldVideo =
+                listing.video || '';
 
-            let finalVideo = clean(req.body.existingVideo);
+            const newVideoFile =
+                req.files?.video?.[0];
+
+            let finalVideo = clean(
+                req.body.existingVideo
+            );
 
             if (newVideoFile) {
-                finalVideo = `/uploads/${newVideoFile.filename}`;
+                finalVideo =
+                    `/uploads/${newVideoFile.filename}`;
 
-                if (oldVideo && oldVideo !== finalVideo) {
-                    deleteFileUrl(oldVideo);
+                if (
+                    oldVideo &&
+                    oldVideo !== finalVideo
+                ) {
+                    deleteFileUrl(
+                        oldVideo
+                    );
                 }
-            } else if (!finalVideo && oldVideo) {
-                deleteFileUrl(oldVideo);
+            } else if (
+                !finalVideo &&
+                oldVideo
+            ) {
+                deleteFileUrl(
+                    oldVideo
+                );
             }
 
             listing.title =
-                clean(req.body.title) || listing.title;
+                clean(req.body.title) ||
+                listing.title;
 
             listing.categoryId =
-                clean(req.body.categoryId) || listing.categoryId;
+                clean(
+                    req.body.categoryId
+                ) ||
+                listing.categoryId;
 
-            listing.price = clean(req.body.price);
-            listing.location = clean(req.body.location);
-            listing.description = clean(req.body.description);
-            listing.images = finalImages;
-            listing.video = finalVideo;
-            listing.published = req.body.published !== 'false';
-            listing.updatedAt = new Date().toISOString();
+            listing.price = clean(
+                req.body.price
+            );
+
+            listing.location = clean(
+                req.body.location
+            );
+
+            listing.description = clean(
+                req.body.description
+            );
+
+            listing.images =
+                finalImages;
+
+            listing.video =
+                finalVideo;
+
+            listing.published =
+                req.body.published !==
+                'false';
+
+            listing.updatedAt =
+                new Date().toISOString();
 
             saveData();
 
@@ -450,114 +896,268 @@ app.put(
             });
         } catch (err) {
             console.error(err);
+
             res.status(500).json({
                 success: false,
-                message: 'حدث خطأ أثناء تعديل الإعلان'
+                message:
+                    'حدث خطأ أثناء تعديل الإعلان'
             });
         }
     }
 );
 
-/* =========================
-   حذف إعلان
-========================= */
+/* =========================================
+   DELETE LISTING
+========================================= */
 
-app.delete('/api/listings/:id', requireAdmin, (req, res) => {
-    const listing = data.listings.find(
-        x => x.id === req.params.id
+app.delete(
+    '/api/listings/:id',
+    requireAdmin,
+    (req, res) => {
+        const listing =
+            data.listings.find(
+                x =>
+                    x.id ===
+                    req.params.id
+            );
+
+        if (!listing) {
+            return res.status(404).json({
+                success: false,
+                message:
+                    'الإعلان غير موجود'
+            });
+        }
+
+        for (
+            const image of
+            listing.images || []
+        ) {
+            deleteFileUrl(image);
+        }
+
+        if (listing.video) {
+            deleteFileUrl(
+                listing.video
+            );
+        }
+
+        data.listings =
+            data.listings.filter(
+                x =>
+                    x.id !==
+                    req.params.id
+            );
+
+        saveData();
+
+        res.json({
+            success: true
+        });
+    }
+);
+
+/* =========================================
+   MANIFEST / ICONS / OG
+========================================= */
+
+app.get(
+    '/manifest.json',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                VISITOR_DIR,
+                'manifest.json'
+            )
+        );
+    }
+);
+
+app.get(
+    '/icon-192.png',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                UPLOAD_DIR,
+                'icon-192.png'
+            )
+        );
+    }
+);
+
+app.get(
+    '/icon-512.png',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                UPLOAD_DIR,
+                'icon-512.png'
+            )
+        );
+    }
+);
+
+app.get(
+    '/og-image.jpg',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                UPLOAD_DIR,
+                'og-image.jpg'
+            )
+        );
+    }
+);
+
+/* =========================================
+   SERVICE WORKER
+========================================= */
+
+app.get(
+    '/sw.js',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                VISITOR_DIR,
+                'sw.js'
+            )
+        );
+    }
+);
+
+/* =========================================
+   ADMIN PAGE
+========================================= */
+
+app.get(
+    '/admin',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                ADMIN_DIR,
+                'index.html'
+            )
+        );
+    }
+);
+
+/* =========================================
+   VISITOR PAGE
+========================================= */
+
+app.get(
+    '/',
+    (req, res) => {
+        res.sendFile(
+            path.join(
+                VISITOR_DIR,
+                'index.html'
+            )
+        );
+    }
+);
+
+/* =========================================
+   ERROR HANDLER
+========================================= */
+
+app.use(
+    (err, req, res, next) => {
+        if (
+            err instanceof
+            multer.MulterError
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    err.code ===
+                    'LIMIT_FILE_SIZE'
+                        ? 'حجم الملف كبير جداً'
+                        : err.message
+            });
+        }
+
+        if (err) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    err.message ||
+                    'حدث خطأ'
+            });
+        }
+
+        next();
+    }
+);
+
+/* =========================================
+   START SERVER
+========================================= */
+
+async function startServer() {
+    /*
+       أولاً:
+       نحاول جلب آخر نسخة من Firebase.
+       إذا لم توجد بيانات، يتم رفع data.json الحالية.
+    */
+
+    await restoreFromFirebase();
+
+    app.listen(
+        PORT,
+        () => {
+            console.log('');
+            console.log(
+                '===================================='
+            );
+            console.log(
+                '  INTERACTIVE EXHIBITION'
+            );
+            console.log(
+                '===================================='
+            );
+            console.log(
+                `  http://127.0.0.1:${PORT}`
+            );
+            console.log(
+                `  Admin: http://127.0.0.1:${PORT}/admin`
+            );
+            console.log(
+                '  Admin password: 123456'
+            );
+            console.log(
+                `  Firebase: ${
+                    firebaseEnabled
+                        ? 'ENABLED'
+                        : 'DISABLED'
+                }`
+            );
+            console.log(
+                '===================================='
+            );
+            console.log('');
+        }
+    );
+}
+
+startServer().catch(err => {
+    console.error(
+        'Server startup error:',
+        err
     );
 
-    if (!listing) {
-        return res.status(404).json({
-            success: false,
-            message: 'الإعلان غير موجود'
-        });
-    }
+    /*
+       حتى لو فشلت Firebase بالكامل،
+       يبقى السيرفر قادرًا على العمل
+       باستخدام data.json.
+    */
 
-    for (const image of listing.images || []) {
-        deleteFileUrl(image);
-    }
-
-    if (listing.video) {
-        deleteFileUrl(listing.video);
-    }
-
-    data.listings = data.listings.filter(
-        x => x.id !== req.params.id
+    app.listen(
+        PORT,
+        () => {
+            console.log(
+                `Server started on port ${PORT} using local data`
+            );
+        }
     );
-
-    saveData();
-
-    res.json({
-        success: true
-    });
-});
-
-/* =========================
-   صفحة الأدمن
-========================= */
-
-app.get('/manifest.json', (req, res) => {
-    res.sendFile(path.join(VISITOR_DIR, 'manifest.json'));
-});
-
-app.get('/icon-192.png', (req, res) => {
-    res.sendFile(path.join(UPLOAD_DIR, 'icon-192.png'));
-});
-
-app.get('/icon-512.png', (req, res) => {
-    res.sendFile(path.join(UPLOAD_DIR, 'icon-512.png'));
-});
-
-app.get('/og-image.jpg', (req, res) => {
-    res.sendFile(path.join(UPLOAD_DIR, 'og-image.jpg'));
-});
-
-app.get('/sw.js', (req, res) => {
-    res.sendFile(path.join(VISITOR_DIR, 'sw.js'));
-});
-
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(ADMIN_DIR, 'index.html'));
-});
-
-app.get('/', (req, res) => {
-    res.sendFile(path.join(VISITOR_DIR, 'index.html'));
-});
-
-/* =========================
-   أخطاء رفع الملفات
-========================= */
-
-app.use((err, req, res, next) => {
-    if (err instanceof multer.MulterError) {
-        return res.status(400).json({
-            success: false,
-            message:
-                err.code === 'LIMIT_FILE_SIZE'
-                    ? 'حجم الملف كبير جداً'
-                    : err.message
-        });
-    }
-
-    if (err) {
-        return res.status(400).json({
-            success: false,
-            message: err.message || 'حدث خطأ'
-        });
-    }
-
-    next();
-});
-
-app.listen(PORT, () => {
-    console.log('');
-    console.log('====================================');
-    console.log('  INTERACTIVE EXHIBITION');
-    console.log('====================================');
-    console.log(`  http://127.0.0.1:${PORT}`);
-    console.log(`  Admin: http://127.0.0.1:${PORT}/admin`);
-    console.log('  Admin password: 123456');
-    console.log('====================================');
-    console.log('');
 });
