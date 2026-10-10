@@ -762,6 +762,8 @@ if (videoFile) {
                     req.body.location
                 ),
 
+                whatsapp: clean(req.body.whatsapp),
+
                 description: clean(
                     req.body.description
                 ),
@@ -939,6 +941,8 @@ app.put(
             listing.location = clean(
                 req.body.location
             );
+
+            listing.whatsapp = clean(req.body.whatsapp);
 
             listing.description = clean(
                 req.body.description
