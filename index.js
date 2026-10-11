@@ -331,7 +331,7 @@ function normalizeImages(value) {
 }
 
 
-async function uploadToImageKit(file) {
+/*async function uploadToImageKit(file) {
     if (!file || !process.env.IMAGEKIT_PRIVATE_KEY) {
         return null;
     }
@@ -352,6 +352,33 @@ async function uploadToImageKit(file) {
         );
 
         return null;
+    }
+}*/
+async function uploadToImageKit(file) {
+    if (!file) {
+        throw new Error('لم يتم تحديد الملف');
+    }
+
+    if (!process.env.IMAGEKIT_PRIVATE_KEY || !imagekit) {
+        throw new Error('مفتاح ImageKit غير مضبوط على السيرفر');
+    }
+
+    try {
+        const result = await imagekit.files.upload({
+            file: fs.createReadStream(file.path),
+            fileName: file.filename,
+            useUniqueFileName: true,
+            folder: '/exhibition'
+        });
+
+        if (!result || !result.url) {
+            throw new Error('لم يُرجع ImageKit رابط الملف');
+        }
+
+        return result.url;
+    } catch (err) {
+        console.error('ImageKit upload error:', err.message);
+        throw err;
     }
 }
                
@@ -684,6 +711,89 @@ app.post(
             maxCount: 1
         }
     ]),
+    async (req, res) => {
+        try {
+            const title = clean(req.body.title);
+            const categoryId = clean(req.body.categoryId);
+
+            if (!title || !categoryId) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'العنوان والتصنيف مطلوبان'
+                });
+            }
+
+            const category = data.categories.find(
+                x => String(x.id) === String(categoryId)
+            );
+
+            if (!category) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'التصنيف غير موجود'
+                });
+            }
+
+            const imageFiles = req.files?.images || [];
+
+            const images = await Promise.all(
+                imageFiles.map(file => uploadToImageKit(file))
+            );
+
+            const videoFile = req.files?.video?.[0];
+            let videoUrl = '';
+
+            if (videoFile) {
+                videoUrl = await uploadToImageKit(videoFile);
+            }
+
+            const listing = {
+                id: crypto.randomUUID(),
+                title,
+                categoryId,
+                price: clean(req.body.price),
+                location: clean(req.body.location),
+                whatsapp: clean(req.body.whatsapp),
+                description: clean(req.body.description),
+                images,
+                video: videoUrl,
+                published: req.body.published !== 'false',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            data.listings.unshift(listing);
+            saveData();
+
+            res.json({
+                success: true,
+                listing
+            });
+        } catch (err) {
+            console.error('Add listing error:', err.message);
+
+            res.status(500).json({
+                success: false,
+                message: 'تعذر إضافة الإعلان أو رفع ملفاته'
+            });
+        }
+    }
+);
+
+
+/*app.post(
+    '/api/listings',
+    requireAdmin,
+    upload.fields([
+        {
+            name: 'images',
+            maxCount: 15
+        },
+        {
+            name: 'video',
+            maxCount: 1
+        }
+    ]),
    async (req, res) => {
     try {
             const title = clean(
@@ -803,13 +913,117 @@ if (videoFile) {
             });
         }
     }
-);
+);*/
 
 /* =========================================
    EDIT LISTING
 ========================================= */
 
+
 app.put(
+    '/api/listings/:id',
+    requireAdmin,
+    upload.fields([
+        {
+            name: 'images',
+            maxCount: 15
+        },
+        {
+            name: 'video',
+            maxCount: 1
+        }
+    ]),
+    async (req, res) => {
+        try {
+            const listing = data.listings.find(
+                x => x.id === req.params.id
+            );
+
+            if (!listing) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'الإعلان غير موجود'
+                });
+            }
+
+            const oldImages = Array.isArray(listing.images)
+                ? listing.images
+                : [];
+
+            const existingImages = normalizeImages(
+                req.body.existingImages
+            );
+
+            const newImageFiles = req.files?.images || [];
+
+            const newImages = await Promise.all(
+                newImageFiles.map(file => uploadToImageKit(file))
+            );
+
+            const finalImages = [
+                ...existingImages,
+                ...newImages
+            ];
+
+            const oldVideo = listing.video || '';
+            const newVideoFile = req.files?.video?.[0];
+
+            let finalVideo = clean(req.body.existingVideo);
+
+            if (newVideoFile) {
+                finalVideo = await uploadToImageKit(newVideoFile);
+            }
+
+            for (const oldImage of oldImages) {
+                if (!finalImages.includes(oldImage)) {
+                    deleteFileUrl(oldImage);
+                }
+            }
+
+            if (
+                oldVideo &&
+                oldVideo !== finalVideo
+            ) {
+                deleteFileUrl(oldVideo);
+            }
+
+            listing.title =
+                clean(req.body.title) || listing.title;
+
+            listing.categoryId =
+                clean(req.body.categoryId) || listing.categoryId;
+
+            listing.price = clean(req.body.price);
+            listing.location = clean(req.body.location);
+            listing.whatsapp = clean(req.body.whatsapp);
+            listing.description = clean(req.body.description);
+            listing.images = finalImages;
+            listing.video = finalVideo;
+            listing.published = req.body.published !== 'false';
+            listing.updatedAt = new Date().toISOString();
+
+            saveData();
+
+            res.json({
+                success: true,
+                listing
+            });
+        } catch (err) {
+            console.error('Edit listing error:', err.message);
+
+            res.status(500).json({
+                success: false,
+                message: 'تعذر تعديل الإعلان أو رفع ملفاته'
+            });
+        }
+    }
+);
+
+
+
+
+
+/*app.put(
     '/api/listings/:id',
     requireAdmin,
     upload.fields([
@@ -977,7 +1191,7 @@ app.put(
             });
         }
     }
-);
+);*/
 
 /* =========================================
    DELETE LISTING
