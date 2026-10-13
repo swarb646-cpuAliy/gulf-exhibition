@@ -590,8 +590,16 @@ app.post(
             icon
         };
 
-        data.categories.push(category);
+   //     data.categories.push(category);
 
+        const otherIndex = data.categories.findIndex(c => c.name.trim() === 'أخرى');
+
+if (otherIndex !== -1) {
+    data.categories.splice(otherIndex, 0, category);
+} else {
+    data.categories.push(category);
+}
+        
         saveData();
 
         res.json({
